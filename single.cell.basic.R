@@ -1,6 +1,6 @@
 #!/usr/bin/env Rscript
 
-#### Title: Seurat analysis with sample name as argument
+#### Title: Seurat analysis: Reads raw data, scaling, normalization, PCA, annotations, signatures, DGE
 #### Author: Tagore, Somnath
 
 print(paste('Start:',Sys.time()))
@@ -18,6 +18,7 @@ library(pheatmap)
 library(Matrix)
 library(stringi)
 library(Seurat)
+library(RColorBrewer)
 
 pat <- commandArgs()[6]
 doublet_rate <-0.0644
@@ -25,10 +26,13 @@ print(pat)
 
 ##### Loading, merging, QC, dimension reduction #####
 ### Load dataset
+### Read the relevant object (.h5 or .rds)
 seu.data <- Read10X_h5(paste0("currentdirectory/",pat,"/",pat,'_filtered.h5'), 
                        use.names = TRUE, unique.features = TRUE)
+seu.data <- readRDS(paste0("currentdirectory/",pat,"/",pat,'.rds'))
 
 ### Initialize the Seurat object with the raw (non-normalized data)
+### Required when reading the .h5 file above. Not required if the above object is in seurat format
 seu_raw <- CreateSeuratObject(counts = seu.data, project = pat, 
                               min.cells = 1, min.features = 1)
 
@@ -46,11 +50,13 @@ seu_raw$barcode_orig<-rownames(seu_raw@meta.data)
 seu_raw$barcode_pat<-paste0(seu_raw$barcode_orig,'_',pat)
 
 # Add clinical data
+# Optional
 clin<-read.csv('currentdirectory/clinicalmetadata.csv',na.strings = '')
 seu_raw@meta.data<-left_join(seu_raw@meta.data,clin,by='sample')
 rownames(seu_raw@meta.data)<-seu_raw$barcode_orig
 
 # Identify doublets using scrublet
+# Optional / Only required when running for doublet detection
 #doublet_rate<-doublet_rate[doublet_rate$sample==pat,2]
 writeMM(seu_raw@assays$RNA@counts, paste0('currentdirectory/',pat,'/matrix_',pat,'_raw.mtx'))
 system(paste('python3 ~/scrublet/scrublet_code.py', pat, doublet_rate))
@@ -184,4 +190,34 @@ DimPlot(seu, reduction = "umap",label = T,group.by = 'celltype_hpca_main',repel 
   theme(legend.text=element_text(size=6))
 
 dev.off()
+
+## Signature generation
+mysignature <- read.csv(file='~/signatures.csv')
+seu <- AddModuleScore(
+  object = seu,
+  features = list(mysignature[,1]),
+  assay = 'RNA',
+  ctrl = 5,
+  name = paste0('Signature_1_')#'general_markers_'
+)
+name <- paste0('Signature_1_')
+seu[[name]] <- CreateAssayObject(data = t(x = FetchData(object = seu, vars = paste0(name,'1'))))
+
+## Displaying the signature
+pdf(file = paste0("currentdirectory/",pat,"/plots_", pat,"_signature.pdf"))
+  print(DimPlot(seu, reduction = "pca",group.by = 'ident',label.size=5.2))
+  print(DimPlot(seu, reduction = "umap",label = T,group.by = 'ident',label.size=5.2))
+  FeaturePlot(seu,features  = 'Signature_1_1')+ scale_colour_gradientn(colours = rev(brewer.pal(n = 11, name = "RdBu")))
+dev.off()
+
+## Differential Gene Expression
+seu.markers <- FindAllMarkers(object = seu, only.pos = FALSE, min.pct = 0.25, thresh.use = 0.25)
+write.csv(seu.markers,file=paste0("currentdirectory/",pat,"/",pat,".markers.dge.csv"))
+pdf(paste0("currentdirectory/",pat,"/",pat,".markers.DGE.pdf"),height=15,width=15)
+seu.markers %>%
+  group_by(cluster) %>%
+  top_n(n = 10, wt = avg_log2FC) -> top10
+DoHeatmap(seu, features = top10$gene) + NoLegend()
+dev.off()
+
 print(paste('End:',Sys.time()))
